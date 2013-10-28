@@ -22,11 +22,20 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
 // Check for MultiWii
 #if defined(MSP_VERSION)
   #define MULTIWII
-#else
+#elif defined(__AVR__)
   #include <EEPROM.h>
 #endif
 
+#if defined(__AVR__)
 #define AUL_SERIALRATE 19200
+#elif defined(__MSP430__)
+#define AUL_SERIALRATE 9600
+#endif
+
+#if defined(__MSP430__)
+#define sei() __eint()
+#define cli() __dint()
+#endif
 
 #define AUL_MIN_BITTIME 4
 #define AUL_MAX_BITTIME 136
@@ -35,38 +44,78 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
 #define AUL_MICROS_TO_TICKS(x)  ((x) * (F_CPU / 1000000) / g_timerScale)
 #define AUL_MICROS_TO_TICKS_R(x) ((x) * g_timerScale / (F_CPU / 1000000))
 
-#if defined(__AVR_ATmega8__)
-#define AUL_SET_TIMER_MODE TCCR2 = g_timerConfig
-#else
-#define AUL_SET_TIMER_MODE TCCR2B = g_timerConfig
+#if defined(__AVR__)
+#define AUL_TIMER_SCALE2 g_timerConfig = (1 << CS20)
+#define AUL_TIMER_SCALE16 g_timerConfig = (1 << CS22)
+#define AUL_TIMER_SCALE64 g_timerConfig = (1 << CS21) | (1 << CS20)
+#define AUL_TIMER_SCALE128 g_timerConfig = (1 << CS22) | (1 << CS20)
+#elif defined(__MSP430__)
+#define AUL_TIMER_SCALE2 g_timerConfig = 0
+#define AUL_TIMER_SCALE16 g_timerConfig = 3
+#define AUL_TIMER_SCALE64 g_timerConfig = 5
+#define AUL_TIMER_SCALE128 g_timerConfig = 6
 #endif
 
+#if defined(__AVR_ATmega8__)
+#define AUL_SET_TIMER_MODE TCCR2 = g_timerConfig
+#elif defined(__AVR__)
+#define AUL_SET_TIMER_MODE TCCR2B = g_timerConfig
+#elif defined(__MSP430__)
+/* SMCLK, /2, Continuous mode, clear everything, no interrupts */
+#define TIMER_CFG (TASSEL1 | ID0 | MC1 | TACLR)
+#define AUL_SET_TIMER_MODE TACTL = TIMER_CFG
+#endif
+
+#if defined(__AVR__)
 // Default PD2/INT0
 #define AUL_DEFAULT_PIN 18
+#elif defined(__MSP430__)
+#define AUL_DEFAULT_PIN P1_7
+#endif
 
 #define AUL_BUFSIZE 300
 
 #define AUL_SERIALTIMEOUT ((F_CPU >> 7) / (9600 >> 4))
 
+#if defined(__AVR__)
 #define AUL_PININPUT  ((*g_signalDDR)  &= ~(g_signalPinPortNum))
 #define AUL_PINOUTPUT ((*g_signalDDR)  |=  (g_signalPinPortNum))
 #define AUL_PINHIGH   ((*g_signalPORT) |=  (g_signalPinPortNum))
 #define AUL_PINLOW    ((*g_signalPORT) &= ~(g_signalPinPortNum))
 
 #define AUL_PINREAD   ((*g_signalPIN) & (g_signalPinPortNum))
+#else
+#define AUL_PININPUT  pinMode(AUL_DEFAULT_PIN, INPUT)
+#define AUL_PINOUTPUT pinMode(AUL_DEFAULT_PIN, OUTPUT)
+#define AUL_PINHIGH   digitalWrite(AUL_DEFAULT_PIN, HIGH)
+#define AUL_PINLOW    digitalWrite(AUL_DEFAULT_PIN, LOW)
+
+#define AUL_PINREAD   digitalRead(AUL_DEFAULT_PIN)
+#endif
+
+#ifdef __AVR__
+#define AUL_TIME_RESET TCNT2 = 0
+#define AUL_TIME_GREATER(x) (TCNT2 > (x))
+#elif defined(__MSP430__)
+#define AUL_TIME_RESET TAR = 0
+#define AUL_TIME_GREATER(x) (TAR > ((x) << g_timerConfig))
+#endif
 
 #define AUL_DELAYTICKS(x) \
-  TCNT2 = 0; \
-  while (TCNT2 < (x));
+  AUL_TIME_RESET; \
+  while (!AUL_TIME_GREATER(x));
 
 #if defined(__AVR_ATmega8__)
 #define AUL_SYNC_PRESCALER \
   SFIOR = (1 << PSR2); \
   while (SFIOR & (1 << PSR2));
-#else
+#elif defined(__AVR__)
 #define AUL_SYNC_PRESCALER \
   GTCCR = (1 << PSRASY); \
   while (GTCCR & (1 << PSRASY));
+#elif defined(__MSP430__)
+/* Whatever */
+#define AUL_SYNC_PRESCALER AUL_DELAYTICKS(100)
 #endif
 
 // Save space on MultWii since baud rate changes are not supported and it is the
@@ -123,9 +172,17 @@ static char* AUL_itoa(AUL_ASCII_INT_TYPE n, char *b)
    } while (n > 0);
 
    b[i] = '\0';
-   
+
+#if 0   
    strrev(b);
-   
+#else
+   for (s = 0; s < (i >> 1); s++) {
+     uint8_t tmp = b[s];
+     b[s] = b[i - s - 1];
+     b[i - s - 1] = tmp;
+   }
+#endif
+
    return &b[i];
 }
 
@@ -228,6 +285,7 @@ static void AUL_SerialWriteStr(const char* b)
 // Clear all timers and PWM settings
 static void DisableAllTimers()
 {
+#if defined(__AVR__)
   #define AUL_RESET_PORT(x) \
     TCCR##x##B = 0; \
     TCCR##x##A = 0;
@@ -264,6 +322,7 @@ static void DisableAllTimers()
   #if defined(TCCR6B)
     AUL_RESET_PORT(6)
   #endif
+#endif
 }
 
 static void SignalPinStatus(char* buf)
@@ -327,6 +386,7 @@ static void SignalPinStatus(char* buf)
 
 static void SignalPinInit(int8_t pin)
 {
+#if 0
   #define AUL_SETUP_PORT(x) \
     if (pin < (pincnt += 8)) \
     { \
@@ -378,8 +438,9 @@ static void SignalPinInit(int8_t pin)
   #if defined(PORTA)
     AUL_SETUP_PORT(A);
   #endif
+#endif
 
-finished:  
+finished:
   AUL_PINHIGH; // Enable pull-up
   AUL_PININPUT;
 }
@@ -419,23 +480,23 @@ static void SendByte(uint8_t b)
 ///////////////////////////////////////////////////////////////////////////////
 
 #define AUL_SPINPINHIGH \
-  TCNT2 = 0; \
-  while (AUL_PINREAD) { if (TCNT2 > 250) goto timeout; }
+  AUL_TIME_RESET; \
+  while (AUL_PINREAD) { if (AUL_TIME_GREATER(250)) goto timeout; }
 
 #define AUL_SPINPINLOW \
-  TCNT2 = 0; \
-  while (!AUL_PINREAD) { if (TCNT2 > 250) goto timeout; }
+  AUL_TIME_RESET; \
+  while (!AUL_PINREAD) { if (AUL_TIME_GREATER(250)) goto timeout; }
 
 #define AUL_NT_SPINPINHIGH \
-  while (AUL_PINREAD) { if (TCNT2 > 250) goto timeout; }
+  while (AUL_PINREAD) { if (AUL_TIME_GREATER(250)) goto timeout; }
 
 #define AUL_NT_SPINPINLOW \
-  while (!AUL_PINREAD) { if (TCNT2 > 250) goto timeout; }
+  while (!AUL_PINREAD) { if (AUL_TIME_GREATER(250)) goto timeout; }
 
 #define AUL_READBIT \
   AUL_SPINPINHIGH \
   AUL_NT_SPINPINLOW \
-  if (TCNT2 <= g_shortBitTime) \
+  if (!AUL_TIME_GREATER(g_shortBitTime)) \
   { \
     AUL_SPINPINHIGH \
     AUL_NT_SPINPINLOW \
@@ -459,7 +520,11 @@ static int8_t ReadLeader()
   // Calculate timing from header
   AUL_SPINPINHIGH
   AUL_NT_SPINPINLOW
+#if defined(__AVR__)
   g_bitTime = TCNT2;
+#elif defined(__MSP430__)
+  g_bitTime = TAR >> g_timerConfig;
+#endif
   g_shortBitTime = (g_bitTime >> 1) + (g_bitTime >> 2);
 #else
   // Use fixed timing
@@ -491,17 +556,17 @@ static void SetBitTime(uint16_t t)
   if (t * (F_CPU / 1000000) < 242)
   {
     g_timerScale = 2;
-    g_timerConfig = (1 << CS20);
+    AUL_TIMER_SCALE2;
   }
   else if (t * (F_CPU / 1000000) / 8 < 242)
   {
     g_timerScale = 16;
-    g_timerConfig = (1 << CS21);
+    AUL_TIMER_SCALE16;
   }
   else if (t * (F_CPU / 1000000) / 32 < 242)
   {
     g_timerScale = 64;
-    g_timerConfig = (1 << CS21) | (1 << CS20);
+    AUL_TIMER_SCALE64;
   }
   else
   {
@@ -512,7 +577,7 @@ static void SetBitTime(uint16_t t)
   g_bitTimeSendHalf = (g_bitTimeSend >> 1);
 }
 
-#if !defined(MULTIWII)
+#if !defined(MULTIWII) && !defined(__MSP430__)
 static uint32_t EERead32(int pos)
 {
   uint32_t value;
@@ -551,7 +616,7 @@ void AUL_loop(uint8_t port)
     #endif
   #endif
   
-  #if defined(MULTIWII)
+  #if defined(MULTIWII) || defined(__MSP430__)
     AUL_SerialInit(port);
     SetBitTime(AUL_DEFAULT_BITTIME);
     SignalPinInit(AUL_DEFAULT_PIN);
@@ -574,9 +639,9 @@ void AUL_loop(uint8_t port)
 
     g_baudRate = EERead32(AUL_EEPROM_BAUD);
     AUL_SerialInit(port);
-    
-    sei(); // Re-enable interrupts for Serial
   #endif
+    
+  sei(); // Re-enable interrupts for Serial
 
   // Set timer2 to count ticks
   AUL_SET_TIMER_MODE;
@@ -590,27 +655,26 @@ void AUL_loop(uint8_t port)
   {
     if (AUL_SerialAvailable())
     {
+      uint8_t tmp_timerConfig = g_timerConfig;
       buflen = 3;
       buf[buflen++] = AUL_SerialRead();
   
       // Temporarily set timer2 to count ticks/128
-#if defined(__AVR_ATmega8__)
-      TCCR2 = (1 << CS22) | (1 << CS20);  
-#else
-      TCCR2B = (1 << CS22) | (1 << CS20);  
-#endif
+      AUL_TIMER_SCALE128;
+      AUL_SET_TIMER_MODE;
       AUL_SYNC_PRESCALER;
-      TCNT2 = 0;     
+      AUL_TIME_RESET;
       // Buffer data until the serial timeout
       do {
          if (AUL_SerialAvailable())
          {
            buf[buflen++] = AUL_SerialRead();
-           TCNT2 = 0;
+           AUL_TIME_RESET;
          }
-      } while (TCNT2 < AUL_SERIALTIMEOUT);
+      } while (!AUL_TIME_GREATER(AUL_SERIALTIMEOUT));
       
       // Set timer2 back to normal
+      g_timerConfig = tmp_timerConfig;
       AUL_SET_TIMER_MODE;
       
       if (buf[3] == '$' && buf[4] == 'M' && buf[5] == '<')
@@ -629,7 +693,7 @@ void AUL_loop(uint8_t port)
         case 'P': // SELECT PORT
           SignalPinInit(AUL_atoi((const char*)&buf[7]));
           break;
-#if !defined(MULTIWII)
+#if !defined(MULTIWII) && !defined(__MSP430__)
         case 'R': // BAUD RATE
           g_baudRate = AUL_atoi((const char*)&buf[7]);
 
@@ -671,17 +735,17 @@ void AUL_loop(uint8_t port)
 #if !defined(MULTIWII)
         if (setbaud)
         {
+          uint8_t tmp_timerConfig = g_timerConfig;
+
           // Arduino Serial.flush does not work correctly
           Serial.flush();
           
           // Temporarily set timer2 to count ticks/128
-#if defined(__AVR_ATmega8__)
-          TCCR2 = (1 << CS22) | (1 << CS20);  
-#else
-          TCCR2B = (1 << CS22) | (1 << CS20);  
-#endif
+          AUL_TIMER_SCALE128;
+          AUL_SET_TIMER_MODE;
           AUL_DELAYTICKS(AUL_SERIALTIMEOUT);
           AUL_DELAYTICKS(AUL_SERIALTIMEOUT);
+          g_timerConfig = tmp_timerConfig;
           AUL_SET_TIMER_MODE;
           
           AUL_SerialInit(port);
@@ -744,11 +808,16 @@ timeout:
 
 #if !defined(MULTIWII)
 
+#if defined(__AVR__)
 int main(int argc, char* argv[])
 {
   AUL_loop(0);
   return 0;
 }
+#else
+void setup() {}
+void loop() { AUL_loop(0); }
+#endif
 
 #endif // !MULTIWII
 
